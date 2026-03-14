@@ -34,18 +34,14 @@ async def zvs_button_handler(call: CallbackQuery, bot: Bot):
     logger.info(f"CALLBACK: {data}")
 
     parts = data.split(":")
-    # Новый формат: act:sheetName:grpMid:row  (4+ частей, последние 2 - цифры)
-    # Старый формат: act:sheetName:row  (3 части, последняя - цифра)
     act = parts[0]
     try:
         row = int(parts[-1])
         grp_mid_str = parts[-2]
         grp_mid = int(grp_mid_str) if grp_mid_str.isdigit() else 0
         if grp_mid > 0:
-            # Новый формат: sheetName между act и grpMid
             sheet_name = ":".join(parts[1:-2])
         else:
-            # Старый формат или grpMid=0
             sheet_name = ":".join(parts[1:-1])
             grp_mid = 0
     except Exception as e:
@@ -64,47 +60,42 @@ async def zvs_button_handler(call: CallbackQuery, bot: Bot):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     director = call.from_user.full_name
 
-    # 1. Убираем кнопки у директора
+    # Исходный текст заявки из сообщения директора
+    orig_text = call.message.text or ""
+
+    # 1. Убираем кнопки у директора — добавляем статус к исходному тексту
     try:
-        orig = call.message.text or ""
         await call.message.edit_text(
-            orig + "\n\n" + emoji + " " + status + "\n" + director + " | " + now,
+            orig_text + "\n\n" + emoji + " " + status + "\n" + director + " | " + now,
             reply_markup=None
         )
         logger.info("Director msg edited OK")
     except Exception as e:
         logger.warning(f"edit director: {e}")
 
-    # 2. Редактируем сообщение в ГРУППЕ
+    # 2. Обновляем сообщение в ГРУППЕ — показываем исходный текст + статус
+    grp_new_text = orig_text + "\n\n" + emoji + " " + status + "\nДиректор: " + director + "\n" + now
+
     if grp_mid > 0:
         try:
-            grp_chat = int(ZVS_GRP)
-            # Сначала пробуем получить текст исходного сообщения
-            new_grp_text = emoji + " " + status + "\nДиректор: " + director + "\n" + now
             await bot.edit_message_text(
-                chat_id=grp_chat,
+                chat_id=int(ZVS_GRP),
                 message_id=grp_mid,
-                text=new_grp_text
+                text=grp_new_text
             )
             logger.info(f"Group msg {grp_mid} edited OK")
         except Exception as e:
             logger.error(f"edit group: {e}")
-            # Если редактировать не получилось — отправляем новое сообщение
+            # Запасной вариант — новое сообщение
             try:
-                await bot.send_message(
-                    chat_id=int(ZVS_GRP),
-                    text=emoji + " " + status + " (ЗВС #" + str(row) + " | " + sheet_name + ")\n" + director + " | " + now
-                )
-                logger.info("Sent new group message as fallback")
+                await bot.send_message(chat_id=int(ZVS_GRP), text=grp_new_text)
             except Exception as e2:
                 logger.error(f"send group fallback: {e2}")
     else:
-        logger.warning(f"grpMid=0, sending new message to group")
+        # Старый формат без grpMid — отправляем новое сообщение в группу
         try:
-            await bot.send_message(
-                chat_id=int(ZVS_GRP),
-                text=emoji + " " + status + " (ЗВС #" + str(row) + " | " + sheet_name + ")\n" + director + " | " + now
-            )
+            await bot.send_message(chat_id=int(ZVS_GRP), text=grp_new_text)
+            logger.info("Sent new group message (no grpMid)")
         except Exception as e:
             logger.error(f"send group: {e}")
 
