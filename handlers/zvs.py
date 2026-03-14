@@ -6,14 +6,14 @@ from aiogram.filters import CommandStart
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
-from config import ZVS_SID, GOOGLE_CREDS_JSON
+from config import ZVS_SID, GOOGLE_CREDS_JSON, ZVS_GRP
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 @router.message(CommandStart())
 async def start_handler(message: Message):
-    await message.answer("✅ ЗВС Бот активен!\nКнопки одобрения/отклонения работают.")
+    await message.answer("✅ ЗВС Бот активен!")
 
 def get_sheet(sheet_name: str):
     scope = [
@@ -31,32 +31,92 @@ def get_sheet(sheet_name: str):
 async def zvs_button_handler(call: CallbackQuery, bot: Bot):
     await call.answer()
     data = call.data
-    last_colon = data.rfind(":")
-    row = int(data[last_colon + 1:])
-    act_sn = data[:last_colon]
-    first_colon = act_sn.index(":")
-    act = act_sn[:first_colon]
-    sheet_name = act_sn[first_colon + 1:]
+    logger.info(f"CALLBACK: {data}")
+
+    parts = data.split(":")
+    # Новый формат: act:sheetName:grpMid:row  (4+ частей, последние 2 - цифры)
+    # Старый формат: act:sheetName:row  (3 части, последняя - цифра)
+    act = parts[0]
+    try:
+        row = int(parts[-1])
+        grp_mid_str = parts[-2]
+        grp_mid = int(grp_mid_str) if grp_mid_str.isdigit() else 0
+        if grp_mid > 0:
+            # Новый формат: sheetName между act и grpMid
+            sheet_name = ":".join(parts[1:-2])
+        else:
+            # Старый формат или grpMid=0
+            sheet_name = ":".join(parts[1:-1])
+            grp_mid = 0
+    except Exception as e:
+        logger.error(f"Parse error: {e} data={data}")
+        return
+
+    logger.info(f"act={act} sheet={sheet_name} grpMid={grp_mid} row={row}")
 
     if act == "ap":
-        status, dec = "ОДОБРЕНО ✅", "Одобрено"
+        status, dec, emoji = "ОДОБРЕНО", "Одобрено", "\u2705"
     elif act == "rj":
-        status, dec = "ОТКЛОНЕНО ❌", "Отклонено"
+        status, dec, emoji = "ОТКЛОНЕНО", "Отклонено", "\u274c"
     else:
-        status, dec = "НА ДОРАБОТКУ 🔄", "На доработку"
+        status, dec, emoji = "НА ДОРАБОТКУ", "На доработку", "\U0001f504"
 
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    try:
-        await call.message.edit_text(f"{call.message.text}\n\n{status}\n{now}")
-    except Exception as e:
-        logger.warning(f"edit_text: {e}")
+    director = call.from_user.full_name
 
+    # 1. Убираем кнопки у директора
+    try:
+        orig = call.message.text or ""
+        await call.message.edit_text(
+            orig + "\n\n" + emoji + " " + status + "\n" + director + " | " + now,
+            reply_markup=None
+        )
+        logger.info("Director msg edited OK")
+    except Exception as e:
+        logger.warning(f"edit director: {e}")
+
+    # 2. Редактируем сообщение в ГРУППЕ
+    if grp_mid > 0:
+        try:
+            grp_chat = int(ZVS_GRP)
+            # Сначала пробуем получить текст исходного сообщения
+            new_grp_text = emoji + " " + status + "\nДиректор: " + director + "\n" + now
+            await bot.edit_message_text(
+                chat_id=grp_chat,
+                message_id=grp_mid,
+                text=new_grp_text
+            )
+            logger.info(f"Group msg {grp_mid} edited OK")
+        except Exception as e:
+            logger.error(f"edit group: {e}")
+            # Если редактировать не получилось — отправляем новое сообщение
+            try:
+                await bot.send_message(
+                    chat_id=int(ZVS_GRP),
+                    text=emoji + " " + status + " (ЗВС #" + str(row) + " | " + sheet_name + ")\n" + director + " | " + now
+                )
+                logger.info("Sent new group message as fallback")
+            except Exception as e2:
+                logger.error(f"send group fallback: {e2}")
+    else:
+        logger.warning(f"grpMid=0, sending new message to group")
+        try:
+            await bot.send_message(
+                chat_id=int(ZVS_GRP),
+                text=emoji + " " + status + " (ЗВС #" + str(row) + " | " + sheet_name + ")\n" + director + " | " + now
+            )
+        except Exception as e:
+            logger.error(f"send group: {e}")
+
+    # 3. Записываем в таблицу
     if GOOGLE_CREDS_JSON:
         try:
             sh = get_sheet(sheet_name)
             existing = sh.cell(row, 11).value
             if not existing:
                 sh.update_cell(row, 11, dec)
-                logger.info(f"ZVS OK: {dec} -> {sheet_name} row={row}")
+                logger.info(f"Sheet OK: {dec} row={row}")
+            else:
+                logger.info(f"Sheet already: {existing}")
         except Exception as e:
-            logger.error(f"ZVS sheet error: {e}")
+            logger.error(f"sheet: {e}")
