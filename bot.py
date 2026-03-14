@@ -15,7 +15,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 async def main():
     bot = Bot(
         token=ZVS_TOKEN,
@@ -29,7 +28,6 @@ async def main():
         await dp.start_polling(bot, allowed_updates=["callback_query", "message"])
     finally:
         await bot.session.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
