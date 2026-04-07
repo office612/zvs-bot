@@ -14,6 +14,10 @@ router = Router()
 # In-memory set: (sheet_name, row_num) уже отправленных заявок
 sent_rows = set()
 
+# Маппинг index -> sheet_name для коротких callback_data
+sheet_map = {}
+sheet_counter = 0
+
 
 def get_client():
     scope = [
@@ -127,14 +131,25 @@ async def check_new_rows(bot: Bot):
                 logger.error(f"send group: {e}")
 
             # Кнопки для директора
-            # Формат callback: act:sheet_name:grp_mid:row
+            # Формат callback: act:sid:grp_mid:row (sid = short sheet id)
+            global sheet_counter
+            sid = None
+            for k, v in sheet_map.items():
+                if v == sheet_name:
+                    sid = k
+                    break
+            if sid is None:
+                sid = sheet_counter
+                sheet_map[sid] = sheet_name
+                sheet_counter += 1
+
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Одобрить", callback_data=f"ap:{sheet_name}:{grp_mid}:{row_num}"),
-                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rj:{sheet_name}:{grp_mid}:{row_num}"),
+                    InlineKeyboardButton(text="✅ Одобрить", callback_data=f"ap:{sid}:{grp_mid}:{row_num}"),
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rj:{sid}:{grp_mid}:{row_num}"),
                 ],
                 [
-                    InlineKeyboardButton(text="🔄 На доработку", callback_data=f"rw:{sheet_name}:{grp_mid}:{row_num}"),
+                    InlineKeyboardButton(text="🔄 На доработку", callback_data=f"rw:{sid}:{grp_mid}:{row_num}"),
                 ],
             ])
 
@@ -165,7 +180,11 @@ async def zvs_button_handler(call: CallbackQuery, bot: Bot):
     try:
         row = int(parts[-1])
         grp_mid = int(parts[-2])
-        sheet_name = ":".join(parts[1:-2])
+        sid = int(parts[1])
+        sheet_name = sheet_map.get(sid, "")
+        if not sheet_name:
+            logger.error(f"Unknown sheet id: {sid}")
+            return
     except Exception as e:
         logger.error(f"Parse error: {e} data={data}")
         return
