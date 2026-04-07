@@ -11,12 +11,24 @@ from config import ZVS_SID, GOOGLE_CREDS_JSON, ZVS_GRP, ZVS_DIR
 logger = logging.getLogger(__name__)
 router = Router()
 
-# In-memory: уже отправленные заявки
 sent_rows = set()
-
-# Маппинг короткий id -> {sheet_name, row, grp_mid} для callback_data
 cb_store = {}
 cb_counter = 0
+
+# Столбцы таблицы (0-indexed):
+# A(0)=#  B(1)=№  C(2)=Дата  D(3)=Отделение  E(4)=Сотрудник
+# F(5)=Ситуация  G(6)=на что  H(7)=Ссылки  I(8)=Фото  J(9)=Решение
+# K(10)=Сумма  L(11)=Одобрено ЗАВ
+COL_NUM = 1
+COL_DATE = 2
+COL_DEPT = 3
+COL_EMPLOYEE = 4
+COL_SITUATION = 5
+COL_PURPOSE = 6
+COL_LINK = 7
+COL_SUMMA = 10
+COL_APPROVED = 11
+COL_APPROVED_1BASED = 12
 
 
 def get_client():
@@ -36,13 +48,16 @@ def get_sheet(sheet_name):
 
 def get_all_sheets():
     client = get_client()
-    spreadsheet = client.open_by_key(ZVS_SID)
-    return spreadsheet.worksheets()
+    return client.open_by_key(ZVS_SID).worksheets()
+
+
+def safe_get(row, idx):
+    return row[idx].strip() if len(row) > idx else ""
 
 
 @router.message(CommandStart())
 async def start_handler(message: Message):
-    await message.answer("ZVS Bot v2 active")
+    await message.answer("ZVS Bot v3 active")
 
 
 async def check_new_rows(bot: Bot):
@@ -75,25 +90,26 @@ async def check_new_rows(bot: Bot):
             if (sheet_name, row_num) in sent_rows:
                 continue
 
-            has_data = len(row) > 1 and (row[0].strip() or row[1].strip())
-            col_k = row[10].strip() if len(row) > 10 else ""
+            num = safe_get(row, COL_NUM)
+            date = safe_get(row, COL_DATE)
+            has_data = num or date
 
-            if not has_data or col_k:
-                if col_k:
+            approved = safe_get(row, COL_APPROVED)
+            summa = safe_get(row, COL_SUMMA)
+
+            if not has_data or approved:
+                if approved:
                     sent_rows.add((sheet_name, row_num))
                 continue
 
-            summa = row[9].strip() if len(row) > 9 else ""
             if not summa:
                 continue
 
-            num = row[0].strip() if len(row) > 0 else ""
-            date = row[1].strip() if len(row) > 1 else ""
-            dept = row[2].strip() if len(row) > 2 else ""
-            employee = row[3].strip() if len(row) > 3 else ""
-            situation = row[4].strip() if len(row) > 4 else ""
-            purpose = row[5].strip() if len(row) > 5 else ""
-            link = row[6].strip() if len(row) > 6 else ""
+            dept = safe_get(row, COL_DEPT)
+            employee = safe_get(row, COL_EMPLOYEE)
+            situation = safe_get(row, COL_SITUATION)
+            purpose = safe_get(row, COL_PURPOSE)
+            link = safe_get(row, COL_LINK)
 
             text = (
                 f"<b>ZVS #{num}</b>\n"
@@ -108,7 +124,6 @@ async def check_new_rows(bot: Bot):
             if link:
                 text += f'\n<a href="{link}">Doc</a>'
 
-            # Отправляем в группу
             grp_mid = 0
             try:
                 grp_msg = await bot.send_message(
@@ -117,11 +132,10 @@ async def check_new_rows(bot: Bot):
                     disable_web_page_preview=True,
                 )
                 grp_mid = grp_msg.message_id
-                logger.info(f"GRP sent: {sheet_name} r={row_num} mid={grp_mid}")
+                logger.info(f"GRP ok: {sheet_name} r={row_num}")
             except Exception as e:
                 logger.error(f"send grp: {e}")
 
-            # Сохраняем данные под коротким ID
             global cb_counter
             cid = cb_counter
             cb_counter += 1
@@ -131,7 +145,6 @@ async def check_new_rows(bot: Bot):
                 "grp_mid": grp_mid,
             }
 
-            # Callback: act:cid (максимум ~10 символов)
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="OK", callback_data=f"ap:{cid}"),
@@ -149,7 +162,7 @@ async def check_new_rows(bot: Bot):
                     reply_markup=kb,
                     disable_web_page_preview=True,
                 )
-                logger.info(f"DIR sent: {sheet_name} r={row_num} cid={cid}")
+                logger.info(f"DIR ok: {sheet_name} r={row_num} cid={cid}")
             except Exception as e:
                 logger.error(f"send dir: {e}")
 
@@ -177,7 +190,7 @@ async def zvs_button_handler(call: CallbackQuery, bot: Bot):
     if not info:
         logger.error(f"Unknown cid: {cid}")
         await call.message.edit_text(
-            (call.message.text or "") + "\n\nBot was restarted, please wait for new message",
+            (call.message.text or "") + "\n\nBot restarted, wait for new msg",
             reply_markup=None,
         )
         return
@@ -186,33 +199,28 @@ async def zvs_button_handler(call: CallbackQuery, bot: Bot):
     row = info["row"]
     grp_mid = info["grp_mid"]
 
-    logger.info(f"act={act} sheet={sheet_name} row={row} grp_mid={grp_mid}")
-
     if act == "ap":
-        status, dec, emoji = "ODOBRENO", "Одобрено", "V"
+        status, dec = "ODOBRENO", "Одобрено"
     elif act == "rj":
-        status, dec, emoji = "OTKLONENO", "Отклонено", "X"
+        status, dec = "OTKLONENO", "Отклонено"
     else:
-        status, dec, emoji = "NA DORABOTKU", "На доработку", "R"
+        status, dec = "NA DORABOTKU", "На доработку"
 
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     director = call.from_user.full_name
     orig_text = call.message.text or ""
 
-    # 1. Убираем кнопки у директора
     try:
         await call.message.edit_text(
-            orig_text + f"\n\n{emoji} {status}\n{director} | {now}",
+            orig_text + f"\n\n{status}\n{director} | {now}",
             reply_markup=None,
             disable_web_page_preview=True,
         )
-        logger.info("Dir edited OK")
+        logger.info("Dir edited")
     except Exception as e:
         logger.warning(f"edit dir: {e}")
 
-    # 2. Обновляем в группе
-    grp_text = orig_text + f"\n\n{emoji} {status}\nDirector: {director}\n{now}"
-
+    grp_text = orig_text + f"\n\n{status}\nDirector: {director}\n{now}"
     if grp_mid > 0:
         try:
             await bot.edit_message_text(
@@ -221,27 +229,26 @@ async def zvs_button_handler(call: CallbackQuery, bot: Bot):
                 text=grp_text,
                 disable_web_page_preview=True,
             )
-            logger.info(f"Grp {grp_mid} edited OK")
+            logger.info(f"Grp edited")
         except Exception as e:
             logger.error(f"edit grp: {e}")
             try:
                 await bot.send_message(chat_id=int(ZVS_GRP), text=grp_text, disable_web_page_preview=True)
             except Exception as e2:
-                logger.error(f"send grp fb: {e2}")
+                logger.error(f"grp fb: {e2}")
     else:
         try:
             await bot.send_message(chat_id=int(ZVS_GRP), text=grp_text, disable_web_page_preview=True)
         except Exception as e:
             logger.error(f"send grp: {e}")
 
-    # 3. Записываем в таблицу K
     if GOOGLE_CREDS_JSON:
         try:
             sh = get_sheet(sheet_name)
-            existing = sh.cell(row, 11).value
+            existing = sh.cell(row, COL_APPROVED_1BASED).value
             if not existing:
-                sh.update_cell(row, 11, dec)
-                logger.info(f"Sheet OK: {dec} r={row}")
+                sh.update_cell(row, COL_APPROVED_1BASED, dec)
+                logger.info(f"Sheet ok: {dec} r={row}")
             else:
                 logger.info(f"Sheet exists: {existing}")
         except Exception as e:
